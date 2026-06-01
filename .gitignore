@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Downloads — пользовательские файлы
+downloads/
+
+# IDE
+.DS_Store
+.idea/
+.vscode/
