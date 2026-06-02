@@ -6,12 +6,25 @@ from typing import Optional
 
 import yt_dlp
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, HttpUrl
 
 from editor import router as editor_router
 
 app = FastAPI(title="Media Downloader", version="0.1.0")
+
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").split(",")
+CORS_ORIGINS = [o.strip() for o in CORS_ORIGINS if o.strip()]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS or ["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(editor_router)
 
 DOWNLOADS_DIR = Path("downloads")

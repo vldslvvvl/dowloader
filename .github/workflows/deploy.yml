@@ -1,0 +1,32 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+
+            cd /opt/mediaget
+
+            # Получаем последний код
+            git pull origin main
+
+            # Обновляем зависимости (только если изменился requirements.txt)
+            pip3 install -r requirements.txt --quiet --break-system-packages
+
+            # Перезапускаем сервис
+            sudo systemctl restart mediaget
+
+            echo "✅ Deploy завершён: $(date)"
