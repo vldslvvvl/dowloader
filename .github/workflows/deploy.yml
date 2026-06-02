@@ -24,8 +24,8 @@ jobs:
             # Получаем последний код
             git pull origin main
 
-            # Обновляем зависимости (только если изменился requirements.txt)
-            pip3 install -r requirements.txt --quiet --break-system-packages
+            # Обновляем зависимости через venv (тот же, что использует сервис)
+            /opt/mediaget/.venv/bin/pip install -r requirements.txt --quiet
 
             # Перезапускаем сервис
             sudo systemctl restart mediaget
