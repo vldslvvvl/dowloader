@@ -9,6 +9,9 @@ venv/
 # Downloads — пользовательские файлы
 downloads/
 
+# Куки-файлы — не коммитить, содержат данные аккаунта
+*cookies*.txt
+
 # IDE
 .DS_Store
 .idea/

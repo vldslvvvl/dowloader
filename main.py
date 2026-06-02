@@ -30,6 +30,8 @@ app.include_router(editor_router)
 DOWNLOADS_DIR = Path("downloads")
 DOWNLOADS_DIR.mkdir(exist_ok=True)
 
+YOUTUBE_COOKIES_FILE = os.getenv("YOUTUBE_COOKIES_FILE", "")
+
 
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
@@ -66,6 +68,19 @@ def _sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "_", name)
 
 
+def _base_ydl_opts() -> dict:
+    """Базовые опции yt-dlp, общие для всех запросов.
+    Добавляет cookiefile если задан YOUTUBE_COOKIES_FILE — нужно для возрастных ограничений."""
+    opts: dict = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
+    if YOUTUBE_COOKIES_FILE and Path(YOUTUBE_COOKIES_FILE).exists():
+        opts["cookiefile"] = YOUTUBE_COOKIES_FILE
+    return opts
+
+
 def _quality_to_format(quality: str) -> str:
     mapping = {
         "best":   "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
@@ -85,10 +100,8 @@ def _quality_to_format(quality: str) -> str:
 def get_info(url: str):
     """Возвращает метаданные и список доступных форматов без скачивания."""
     ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
+        **_base_ydl_opts(),
         "skip_download": True,
-        "noplaylist": True,
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -131,11 +144,9 @@ def download_video(req: DownloadRequest):
 
     output_template = str(DOWNLOADS_DIR / "%(title)s.%(ext)s")
     ydl_opts = {
+        **_base_ydl_opts(),
         "format": fmt,
         "outtmpl": output_template,
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
         "merge_output_format": "mp4",
         "postprocessors": [
             {
@@ -172,11 +183,9 @@ def download_audio(req: DownloadRequest):
     Возвращает JSON с именем файла. Файл — через GET /downloads/{filename}/file"""
     output_template = str(DOWNLOADS_DIR / "%(title)s.%(ext)s")
     ydl_opts = {
+        **_base_ydl_opts(),
         "format": "bestaudio/best",
         "outtmpl": output_template,
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
         "writethumbnail": True,
         "postprocessors": [
             {
