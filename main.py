@@ -76,8 +76,8 @@ def _base_ydl_opts() -> dict:
         "no_warnings": True,
         "noplaylist": True,
         # Node.js + загрузка EJS-скрипта с GitHub для расшифровки форматов YouTube
-        "js_runtimes": ["node"],
-        "remote_components": "ejs:github",
+        "js_runtimes": {"node": {}},
+        "remote_components": ["ejs:github"],
     }
     if YOUTUBE_COOKIES_FILE and Path(YOUTUBE_COOKIES_FILE).exists():
         opts["cookiefile"] = YOUTUBE_COOKIES_FILE
