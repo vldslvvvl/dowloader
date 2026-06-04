@@ -6,10 +6,12 @@
 import ffmpeg
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
@@ -21,6 +23,11 @@ EDITED_DIR.mkdir(parents=True, exist_ok=True)
 
 
 router = APIRouter(prefix="/edit", tags=["edit"])
+
+
+def _edited_url(filename: str) -> str:
+    """Безопасный URL для отредактированного файла с percent-encoding."""
+    return f"/downloads/edited/{quote(filename)}/file"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -155,7 +162,7 @@ def trim(req: TrimRequest):
     return {
         "filename": out.name,
         "size_mb": round(out.stat().st_size / 1024 / 1024, 2),
-        "download_url": f"/downloads/edited/{out.name}/file",
+        "download_url": _edited_url(out.name),
     }
 
 
@@ -193,7 +200,81 @@ def extract_audio(req: ExtractAudioRequest):
     return {
         "filename": out.name,
         "size_mb": round(out.stat().st_size / 1024 / 1024, 2),
-        "download_url": f"/downloads/edited/{out.name}/file",
+        "download_url": _edited_url(out.name),
+    }
+
+
+@router.post("/upload-extract-audio", summary="Извлечь аудио из загруженного видеофайла")
+async def upload_extract_audio(
+    file: UploadFile = File(..., description="Видеофайл с компьютера (mp4, mkv, avi, mov, webm …)"),
+    format: str = Form("mp3"),   # mp3 | aac | wav | flac
+    quality: str = Form("192k"), # битрейт для mp3/aac
+):
+    """
+    Принимает видеофайл, загруженный прямо с компьютера, и извлекает из него аудиодорожку.
+
+    - **file**: видеофайл — поддерживаются mp4, mkv, avi, mov, webm и любой формат, который умеет ffmpeg
+    - **format**: формат выходного аудио — `mp3`, `aac`, `wav`, `flac` (по умолчанию `mp3`)
+    - **quality**: битрейт для mp3/aac, например `128k`, `192k`, `256k`, `320k` (по умолчанию `192k`)
+
+    Максимальный размер файла — **500 МБ**.
+    Результат доступен через `download_url` из ответа.
+    """
+    allowed_formats = {"mp3", "aac", "wav", "flac"}
+    if format not in allowed_formats:
+        raise HTTPException(status_code=400, detail=f"Формат должен быть одним из: {allowed_formats}")
+
+    original_name = file.filename or "video"
+    stem = re.sub(r'[\\/*?:"<>|]', "_", Path(original_name).stem) or "audio"
+    src_suffix = Path(original_name).suffix or ".mp4"
+
+    MAX_SIZE = 500 * 1024 * 1024
+
+    tmp_path: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=src_suffix, delete=False) as tmp:
+            shutil.copyfileobj(file.file, tmp)
+            tmp_path = tmp.name
+
+        file_size = os.path.getsize(tmp_path)
+        if file_size == 0:
+            raise HTTPException(status_code=400, detail="Загруженный файл пустой")
+        if file_size > MAX_SIZE:
+            raise HTTPException(status_code=400, detail="Файл слишком большой — максимум 500 МБ")
+
+        out = _out_path(stem, f".{format}", "audio")
+
+        stream = ffmpeg.input(tmp_path)
+        audio = stream.audio
+
+        if format == "mp3":
+            out_stream = ffmpeg.output(audio, str(out), acodec="libmp3lame", audio_bitrate=quality, loglevel="error")
+        elif format == "aac":
+            out_stream = ffmpeg.output(audio, str(out), acodec="aac", audio_bitrate=quality, loglevel="error")
+        elif format == "wav":
+            out_stream = ffmpeg.output(audio, str(out), acodec="pcm_s16le", loglevel="error")
+        else:  # flac
+            out_stream = ffmpeg.output(audio, str(out), acodec="flac", loglevel="error")
+
+        try:
+            out_stream.overwrite_output().run()
+        except ffmpeg.Error as e:
+            raise HTTPException(status_code=500, detail=e.stderr.decode("utf-8", errors="replace") if e.stderr else str(e))
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        import traceback
+        raise HTTPException(status_code=500, detail=traceback.format_exc()) from exc
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    return {
+        "filename": out.name,
+        "size_mb": round(out.stat().st_size / 1024 / 1024, 2),
+        "download_url": _edited_url(out.name),
+        "original_name": original_name,
     }
 
 
@@ -228,7 +309,7 @@ def convert(req: ConvertRequest):
     return {
         "filename": out.name,
         "size_mb": round(out.stat().st_size / 1024 / 1024, 2),
-        "download_url": f"/downloads/edited/{out.name}/file",
+        "download_url": _edited_url(out.name),
     }
 
 
@@ -262,7 +343,7 @@ def change_speed(req: SpeedRequest):
     return {
         "filename": out.name,
         "size_mb": round(out.stat().st_size / 1024 / 1024, 2),
-        "download_url": f"/downloads/edited/{out.name}/file",
+        "download_url": _edited_url(out.name),
     }
 
 
@@ -308,7 +389,7 @@ def list_edited():
             files.append({
                 "name": f.name,
                 "size_mb": round(f.stat().st_size / 1024 / 1024, 2),
-                "download_url": f"/downloads/edited/{f.name}/file",
+                "download_url": _edited_url(f.name),
             })
     return {"files": sorted(files, key=lambda x: x["name"])}
 
@@ -346,7 +427,7 @@ def set_metadata(
     return {
         "filename": out.name,
         "size_mb": round(out.stat().st_size / 1024 / 1024, 2),
-        "download_url": f"/downloads/edited/{out.name}/file",
+        "download_url": _edited_url(out.name),
     }
 
 
@@ -421,7 +502,7 @@ async def set_cover(
     return {
         "filename": out.name,
         "size_mb": round(out.stat().st_size / 1024 / 1024, 2),
-        "download_url": f"/downloads/edited/{out.name}/file",
+        "download_url": _edited_url(out.name),
     }
 
 

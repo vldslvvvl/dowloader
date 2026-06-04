@@ -3,16 +3,24 @@ import re
 import asyncio
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 import yt_dlp
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, HttpUrl
 
 from editor import router as editor_router
 
-app = FastAPI(title="Media Downloader", version="0.1.0")
+app = FastAPI(
+    title="Media Downloader",
+    version="0.2.0",
+    description=(
+        "Скачивание видео и аудио с YouTube, TikTok, Instagram, Twitter/X, Vimeo, Twitch, Reddit "
+        "и 1800+ других площадок через yt-dlp. Поддерживает извлечение аудио, обрезку, конвертацию."
+    ),
+)
 
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").split(",")
 CORS_ORIGINS = [o.strip() for o in CORS_ORIGINS if o.strip()]
@@ -37,7 +45,8 @@ YOUTUBE_COOKIES_FILE = os.getenv("YOUTUBE_COOKIES_FILE", "")
 
 class DownloadRequest(BaseModel):
     url: str
-    quality: Optional[str] = "best"  # "best" | "worst" | "1080p" | "720p" | "480p" | "360p"
+    quality: Optional[str] = "best"  # "best" | "worst" | "2160p" | "1080p" | "720p" | "480p" | "360p"
+    no_watermark: bool = False  # TikTok: попытаться скачать версию без водяного знака
 
 
 class FormatInfo(BaseModel):
@@ -68,20 +77,53 @@ def _sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "_", name)
 
 
-def _base_ydl_opts() -> dict:
-    """Базовые опции yt-dlp, общие для всех запросов.
-    Добавляет cookiefile если задан YOUTUBE_COOKIES_FILE — нужно для возрастных ограничений."""
+def _download_url(filename: str) -> str:
+    """Строит безопасный URL для скачивания с корректным percent-encoding имени файла."""
+    return f"/downloads/{quote(filename)}/file"
+
+
+def _edited_url(filename: str) -> str:
+    return f"/downloads/edited/{quote(filename)}/file"
+
+
+def _is_youtube(url: str) -> bool:
+    return any(h in url for h in ("youtube.com", "youtu.be", "youtube-nocookie.com"))
+
+
+def _is_tiktok(url: str) -> bool:
+    return "tiktok.com" in url
+
+
+def _base_ydl_opts(url: str = "") -> dict:
+    """Базовые опции yt-dlp.
+    YouTube-специфичные параметры добавляются только для YouTube-ссылок."""
     opts: dict = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        # Node.js + загрузка EJS-скрипта с GitHub для расшифровки форматов YouTube
-        "js_runtimes": {"node": {}},
-        "remote_components": ["ejs:github"],
     }
-    if YOUTUBE_COOKIES_FILE and Path(YOUTUBE_COOKIES_FILE).exists():
-        opts["cookiefile"] = YOUTUBE_COOKIES_FILE
+
+    if _is_youtube(url):
+        # Node.js + EJS-скрипт с GitHub для расшифровки форматов YouTube
+        opts["js_runtimes"] = {"node": {}}
+        opts["remote_components"] = ["ejs:github"]
+        if YOUTUBE_COOKIES_FILE and Path(YOUTUBE_COOKIES_FILE).exists():
+            opts["cookiefile"] = YOUTUBE_COOKIES_FILE
+
     return opts
+
+
+def _tiktok_no_watermark_opts() -> dict:
+    """Дополнительные опции для скачивания TikTok без водяного знака."""
+    return {
+        "extractor_args": {
+            "tiktok": {
+                "webpage_download": ["1"],
+            }
+        },
+        # H.264-версия без водяного знака, если доступна
+        "format": "bestvideo[vcodec^=avc]+bestaudio/bestvideo+bestaudio/best",
+    }
 
 
 def _quality_to_format(quality: str) -> str:
@@ -101,9 +143,10 @@ def _quality_to_format(quality: str) -> str:
 
 @app.get("/info", response_model=VideoInfo, summary="Получить информацию о видео")
 def get_info(url: str):
-    """Возвращает метаданные и список доступных форматов без скачивания."""
+    """Возвращает метаданные и список доступных форматов без скачивания.
+    Работает с YouTube, TikTok, Instagram, Twitter/X, Vimeo и 1800+ другими площадками."""
     ydl_opts = {
-        **_base_ydl_opts(),
+        **_base_ydl_opts(url),
         "skip_download": True,
     }
     try:
@@ -141,23 +184,31 @@ def get_info(url: str):
 
 @app.post("/download/video", summary="Скачать видео")
 def download_video(req: DownloadRequest):
-    """Скачивает видео в выбранном качестве. Возвращает JSON с именем файла.
-    Сам файл можно получить через GET /downloads/{filename}/file"""
-    fmt = _quality_to_format(req.quality)
+    """Скачивает видео в выбранном качестве. Работает с YouTube, TikTok, Instagram, Twitter/X, Vimeo и т.д.
+    Возвращает JSON с именем файла; сам файл — через GET /downloads/{filename}/file
 
+    - **no_watermark**: для TikTok — попытаться скачать версию без водяного знака (H.264)
+    """
     output_template = str(DOWNLOADS_DIR / "%(title)s.%(ext)s")
-    ydl_opts = {
-        **_base_ydl_opts(),
-        "format": fmt,
-        "outtmpl": output_template,
-        "merge_output_format": "mp4",
-        "postprocessors": [
-            {
-                "key": "FFmpegVideoConvertor",
-                "preferedformat": "mp4",
-            }
-        ],
-    }
+
+    if req.no_watermark and _is_tiktok(req.url):
+        tiktok_opts = _tiktok_no_watermark_opts()
+        ydl_opts = {
+            **_base_ydl_opts(req.url),
+            **tiktok_opts,
+            "outtmpl": output_template,
+            "merge_output_format": "mp4",
+            "postprocessors": [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}],
+        }
+    else:
+        fmt = _quality_to_format(req.quality)
+        ydl_opts = {
+            **_base_ydl_opts(req.url),
+            "format": fmt,
+            "outtmpl": output_template,
+            "merge_output_format": "mp4",
+            "postprocessors": [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}],
+        }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -175,18 +226,18 @@ def download_video(req: DownloadRequest):
     return {
         "filename": filepath.name,
         "size_mb": round(filepath.stat().st_size / 1024 / 1024, 2),
-        "download_url": f"/downloads/{filepath.name}/file",
+        "download_url": _download_url(filepath.name),
         "title": info.get("title", ""),
     }
 
 
 @app.post("/download/audio", summary="Скачать аудио (MP3)")
 def download_audio(req: DownloadRequest):
-    """Скачивает только аудиодорожку и конвертирует в MP3.
+    """Скачивает только аудиодорожку и конвертирует в MP3. Работает с YouTube, TikTok, Instagram и т.д.
     Возвращает JSON с именем файла. Файл — через GET /downloads/{filename}/file"""
     output_template = str(DOWNLOADS_DIR / "%(title)s.%(ext)s")
     ydl_opts = {
-        **_base_ydl_opts(),
+        **_base_ydl_opts(req.url),
         "format": "bestaudio/best",
         "outtmpl": output_template,
         "writethumbnail": True,
@@ -221,7 +272,7 @@ def download_audio(req: DownloadRequest):
     return {
         "filename": filepath.name,
         "size_mb": round(filepath.stat().st_size / 1024 / 1024, 2),
-        "download_url": f"/downloads/{filepath.name}/file",
+        "download_url": _download_url(filepath.name),
         "title": info.get("title", ""),
     }
 
@@ -283,6 +334,12 @@ def list_downloads():
                 "path": str(f),
             })
     return {"files": sorted(files, key=lambda x: x["name"])}
+
+
+@app.get("/downloads/{filename}", summary="Редирект на скачивание файла", include_in_schema=False)
+def get_file_redirect(filename: str):
+    """Удобный алиас: перенаправляет GET /downloads/{filename} → GET /downloads/{filename}/file."""
+    return RedirectResponse(url=f"/downloads/{filename}/file", status_code=301)
 
 
 @app.delete("/downloads/{filename}", summary="Удалить скачанный файл")
